@@ -147,6 +147,7 @@ export class CoverAtlas {
   private readonly pages: AtlasPage[] = [];
   private readonly arrayGeometry: THREE.PlaneGeometry;
   private readonly selectedTexture: THREE.CanvasTexture;
+  private readonly selectedAnisotropy: number;
   private readonly tileSource: THREE.CanvasTexture;
   private readonly pendingImages = new Map<string, Promise<CoverImage | undefined>>();
   private readonly decodedImages = new Map<string, CoverImage | undefined>();
@@ -206,7 +207,8 @@ export class CoverAtlas {
     this.slotRecords = Array(count);
     this.slotMatrices = Array.from({ length: count }, () => new THREE.Matrix4());
     this.visibleSlots = new Uint8Array(count);
-    this.selectedTexture = this.createCanvasTexture(this.selectedCanvas, Math.min(8, anisotropy));
+    this.selectedAnisotropy = Math.min(8, anisotropy);
+    this.selectedTexture = this.createCanvasTexture(this.selectedCanvas, this.selectedAnisotropy);
     this.arrayGeometry = new THREE.PlaneGeometry(
       COVER_SIZE.width,
       COVER_SIZE.height,
@@ -620,6 +622,18 @@ export class CoverAtlas {
       void this.loadImage(record.album.coverUrl).then((loaded) => {
         if (loaded) this.drawPageTile(pageIndex, tile, key, record, loaded, generation);
       });
+  }
+
+  /** Copy the current selected cover art onto a cloned card (outgoing disc). */
+  snapshotSelectedArt(mesh: THREE.Mesh) {
+    const canvas = document.createElement("canvas");
+    canvas.width = this.selectedCanvas.width;
+    canvas.height = this.selectedCanvas.height;
+    canvas.getContext("2d")!.drawImage(this.selectedCanvas, 0, 0);
+    const material = (mesh.material as THREE.MeshLambertMaterial).clone();
+    material.map = this.createCanvasTexture(canvas, this.selectedAnisotropy);
+    material.needsUpdate = true;
+    mesh.material = material;
   }
 
   /** Decode artwork ahead of a cover switch so select() can paint synchronously. */

@@ -153,8 +153,8 @@ export class ArchiveScene {
   private stars?: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
   private covers?: CoverAtlas;
   private selectedCoverUrl?: string;
-  /** Detail-view cover switch: insert the old disc, then pull the new one out. */
-  private coverSwap: { stage: "return" | "extract"; url: string; record: ArchiveRecord; pauseUntil?: number } | null = null;
+  /** Detail-view cover switch: hold the new disc until the old one has returned. */
+  private discHold: { until: number } | null = null;
   private selectionLighting?: MusicSelectionLighting;
   private theme: "day" | "night" | "dusk" = "day";
   private themeWarmth = { value: 1 };
@@ -527,7 +527,7 @@ export class ArchiveScene {
     this.lift = { value: 0, velocity: 0 };
     this.rotation = this.targetRotation = 0;
     this.selectedCoverUrl = undefined;
-    this.coverSwap = null;
+    this.discHold = null;
     this.returnY = null;
     this.pulses = [];
     this.pendingPulse = null;
@@ -699,7 +699,10 @@ export class ArchiveScene {
     };
   }
   setMode(mode: "hidden" | "archive" | "detail") {
-    if (mode !== "detail") this.coverSwap = null;
+    if (mode !== "detail") {
+      this.discHold = null;
+      this.model.visible = true;
+    }
     if (musicLibrary) this.musicPresentation.request(mode);
     if (musicLibrary && mode === "hidden") {
       this.musicCamera = new MusicCameraMotion();
@@ -919,17 +922,40 @@ export class ArchiveScene {
       return;
     }
 
-    // Detail view: slide the current disc back into its slot, swap the artwork
-    // while it sits in the shelf, then pull the new disc out.
+    // Detail view: detach the old disc (it keeps its own artwork) and slide it
+    // back into its slot, then pull out a different disc carrying the new cover.
     void this.covers.warm(url).then(() => {
       if (this.selectedCoverUrl !== url) return;
-      this.coverSwap = { stage: "return", url, record };
+      this.discHold = null;
+      this.model.visible = true;
+      const outgoing = this.model.clone(true);
+      this.appearance.prepare(outgoing);
+      const cover = outgoing.children.find(
+        (child) => child.userData.albumCover,
+      ) as THREE.Mesh | undefined;
+      if (cover) this.covers!.snapshotSelectedArt(cover);
+      this.appearance.apply(outgoing, ease(this.lift.value / 0.4));
+      this.appearance.setClarity(outgoing, this.decryption.clarity);
+      this.scene.add(outgoing);
+      this.outgoing.push({
+        group: outgoing,
+        slot: this.selectedSlot,
+        cell: { ...this.selectedCell },
+        lift: { ...this.lift },
+        returnY: outgoing.rotation.y !== 0 ? outgoing.position.y : null,
+        clarity: this.decryption.clarity,
+      });
+      // Keep the new disc in its slot until the previous one is back in the shelf.
+      this.discHold = { until: this.clock + 0.5 };
+      this.model.visible = false;
+      this.lift = { value: 0, velocity: 0 };
       this.musicNavigationLift = true;
       this.dragging = this.canInspect = false;
       this.targetRotation = 0;
       this.returnY = null;
       this.pendingPulse = null;
       this.lastInteraction = this.clock;
+      void this.covers!.select(record);
     }).catch(() => {
       this.selectedCoverUrl = album.coverUrl;
       void this.covers?.select(base);
@@ -950,7 +976,8 @@ export class ArchiveScene {
   }
   select(index: number, navigation?: ArchiveNavigation) {
     if (!records[index]) return;
-    this.coverSwap = null;
+    this.discHold = null;
+    this.model.visible = true;
     // Browsing can resume before the return camera is fully settled. A new
     // browsing selection must not inherit the previous detail box's lift mode.
     if (musicLibrary && !this.musicPresentation.placed) this.musicNavigationLift = false;
@@ -1447,26 +1474,12 @@ export class ArchiveScene {
         this.lift.velocity = 0;
       } else {
         this.returnY = null;
-        if (this.coverSwap) {
-          const swap = this.coverSwap;
-          if (swap.stage === "return") {
-            // Send the current disc back into its shelf slot first.
-            if (this.reduced) this.lift = { value: 0, velocity: 0 };
-            else damp(this.lift, 0, 9.5, dt);
-            if (this.lift.value < 0.035) {
-              this.lift = { value: 0, velocity: 0 };
-              swap.stage = "extract";
-              swap.pauseUntil = this.clock + 0.13;
-              // Repaint while the disc sits in the shelf, then lift it out.
-              void this.covers?.select(swap.record);
-            }
-          } else if (this.clock >= (swap.pauseUntil ?? 0)) {
-            // Pull the new disc back out to the inspection pose.
-            damp(this.lift, MUSIC_INSPECTION_LIFT, this.reduced ? 35 : 6.2, dt);
-            if (this.lift.value > MUSIC_INSPECTION_LIFT - 0.08) {
-              this.coverSwap = null;
-              this.musicNavigationLift = false;
-            }
+        if (this.discHold) {
+          // The previous disc is returning; the new one waits in its slot.
+          this.lift = { value: 0, velocity: 0 };
+          if (this.clock >= this.discHold.until) {
+            this.discHold = null;
+            this.model.visible = true;
           }
         } else if (navigationLift) {
           // Placement stays at one throughout a detail switch. Giving the new
