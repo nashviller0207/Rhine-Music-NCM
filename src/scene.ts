@@ -153,21 +153,6 @@ export class ArchiveScene {
   private stars?: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
   private covers?: CoverAtlas;
   private selectedCoverUrl?: string;
-  private discReturnGroup: THREE.Group | null = null;
-  /** Detail-view cover switch: return the old disc, then lift the new one in place. */
-  private discHold: {
-    stage: "return" | "pan";
-    until: number;
-    next: { lane: number; row: number };
-  } | null = null;
-  /** Neighbouring shelf slot the camera moves to for the next disc. */
-  private extractCell: { lane: number; row: number } | null = null;
-  /** Return-to-shelf choreography after leaving the detail view. */
-  private exitFlow: "return-single" | "show-album" | null = null;
-  private exitShowAt = 0;
-  private exitSwapPending = false;
-  private exitSwapAt = 0;
-  private exitExtractPending = false;
   private selectionLighting?: MusicSelectionLighting;
   private theme: "day" | "night" | "dusk" = "day";
   private themeWarmth = { value: 1 };
@@ -480,6 +465,7 @@ export class ArchiveScene {
     );
     for (const array of this.covers.arrays) this.scene.add(array);
     this.model.add(this.covers.selected);
+    this.model.add(this.covers.selectedBack);
     if (!musicLibrary) {
       this.labelCanvas.width = 1024;
       this.labelCanvas.height = 440;
@@ -524,6 +510,7 @@ export class ArchiveScene {
     this.covers.reset();
     for (const array of this.covers.arrays) array.visible = false;
     this.covers.selected.visible = musicLibrary && records.length > 0;
+    this.covers.selectedBack.visible = this.covers.selected.visible;
     this.model.visible = records.length > 0;
     for (const inst of this.instances) inst.visible = records.length > 0;
     if (this.shadowOnlyInstances) this.shadowOnlyInstances.visible = records.length > 0;
@@ -540,11 +527,6 @@ export class ArchiveScene {
     this.lift = { value: 0, velocity: 0 };
     this.rotation = this.targetRotation = 0;
     this.selectedCoverUrl = undefined;
-    this.discHold = null;
-    this.extractCell = null;
-    this.exitFlow = null;
-    this.exitSwapPending = false;
-    this.exitExtractPending = false;
     this.returnY = null;
     this.pulses = [];
     this.pendingPulse = null;
@@ -716,19 +698,22 @@ export class ArchiveScene {
     };
   }
   setMode(mode: "hidden" | "archive" | "detail") {
-    if (mode !== "detail") {
-      this.discHold = null;
+    if (mode === "detail") {
+      // The album cover faces the viewer when the detail opens.
+      this.rotation = 0;
+      this.targetRotation = 0;
       this.model.visible = true;
       this.musicNavigationLift = false;
-      if (this.extractCell) {
-        // The disc goes back into the single shelf it came from; only then the
-        // camera returns to the album shelf and the album card is pulled out.
-        this.exitFlow = "return-single";
-      } else {
-        this.exitSwapPending = true;
-        this.exitSwapAt = this.clock + 0.35;
-        this.exitExtractPending = true;
-      }
+      this.paintBothAlbumFaces();
+    } else if (mode === "archive") {
+      this.model.visible = true;
+      this.musicNavigationLift = false;
+      this.returnToAlbumFace();
+    } else {
+      this.model.visible = true;
+      this.rotation = 0;
+      this.targetRotation = 0;
+      this.paintBothAlbumFaces();
     }
     if (musicLibrary) this.musicPresentation.request(mode);
     if (musicLibrary && mode === "hidden") {
@@ -922,14 +907,43 @@ export class ArchiveScene {
       this.pendingPulse.row -= shift.row;
     }
   }
+  private albumFaceRecord(): ArchiveRecord | undefined {
+    return records[fileAtSlot(this.selectedSlot)];
+  }
+  /** Both faces of the card show the album cover while nothing is playing. */
+  private paintBothAlbumFaces() {
+    const base = this.albumFaceRecord();
+    if (!base || !this.covers) return;
+    this.covers.paintFace("front", base);
+    this.covers.paintFace("back", base);
+    this.selectedCoverUrl = base.album?.coverUrl;
+  }
+  /** Flip once so the album cover ends up facing the camera again. */
+  private returnToAlbumFace() {
+    const base = this.albumFaceRecord();
+    if (!base || !this.covers) return;
+    const albumUrl = base.album?.coverUrl;
+    if (this.targetRotation === 0 && this.selectedCoverUrl === albumUrl) return;
+    const half = Math.round(this.targetRotation / Math.PI);
+    this.covers.paintFace(half % 2 === 0 ? "back" : "front", base);
+    this.targetRotation = (half + 1) * Math.PI;
+    this.selectedCoverUrl = albumUrl;
+  }
+  /** Rotate the card half a turn; the new artwork waits on the hidden face. */
+  private flipToCover(record: ArchiveRecord) {
+    if (!this.covers) return;
+    const half = Math.round(this.targetRotation / Math.PI);
+    this.covers.paintFace(half % 2 === 0 ? "back" : "front", record);
+    this.targetRotation = (half + 1) * Math.PI;
+  }
   /** Swap the lifted card's cover art to the playing track's own cover. */
-  setSelectedCover(coverUrl?: string) {
+  setSelectedCover(coverUrl?: string, forceFlip = false) {
     if (!this.loaded || !this.covers || !records.length) return;
     const base = records[fileAtSlot(this.selectedSlot)];
     const album = base?.album;
     if (!base || !album) return;
     const url = coverUrl || album.coverUrl;
-    if (!url || url === this.selectedCoverUrl) return;
+    if (!url || (url === this.selectedCoverUrl && !forceFlip)) return;
     this.selectedCoverUrl = url;
     const record: ArchiveRecord = { ...base, album: { ...album, coverUrl: url } };
 
@@ -949,45 +963,14 @@ export class ArchiveScene {
       return;
     }
 
-    // Detail view: detach the old disc (it keeps its own artwork) and slide it
-    // back into its slot, then pull out a different disc carrying the new cover.
+    // Detail view: flip the album card half a turn. The face that turns towards
+    // the camera carries the new artwork, so album and single covers alternate.
     void this.covers.warm(url).then(() => {
       if (this.selectedCoverUrl !== url) return;
-      this.discHold = null;
-      this.model.visible = true;
-      const outgoing = this.model.clone(true);
-      this.appearance.prepare(outgoing);
-      const cover = outgoing.children.find(
-        (child) => child.userData.albumCover,
-      ) as THREE.Mesh | undefined;
-      if (cover) this.covers!.snapshotSelectedArt(cover);
-      this.appearance.apply(outgoing, ease(this.lift.value / 0.4));
-      this.appearance.setClarity(outgoing, this.decryption.clarity);
-      this.scene.add(outgoing);
-      this.outgoing.push({
-        group: outgoing,
-        slot: this.selectedSlot,
-        cell: { ...this.selectedCell },
-        lift: { ...this.lift },
-        returnY: outgoing.rotation.y !== 0 ? outgoing.position.y : null,
-        clarity: this.decryption.clarity,
-      });
-      // Swap discs inside the same single shelf: the old disc goes back into
-      // its slot, then the new disc rises from that same slot.
-      this.discReturnGroup = outgoing;
-      this.discHold = { stage: "return", until: this.clock + 1.4, next: this.selectedCell };
-      this.model.visible = false;
-      this.lift = { value: 0, velocity: 0 };
-      this.musicNavigationLift = true;
-      this.dragging = this.canInspect = false;
-      this.targetRotation = 0;
-      this.returnY = null;
-      this.pendingPulse = null;
-      this.lastInteraction = this.clock;
-      void this.covers!.select(record);
+      this.flipToCover(record);
     }).catch(() => {
       this.selectedCoverUrl = album.coverUrl;
-      void this.covers?.select(base);
+      this.covers?.paintFace("front", base);
     });
   }
   /** Current lift height of the selected card (used by the debug API / tests). */
@@ -1005,11 +988,6 @@ export class ArchiveScene {
   }
   select(index: number, navigation?: ArchiveNavigation) {
     if (!records[index]) return;
-    this.discHold = null;
-    this.extractCell = null;
-    this.exitFlow = null;
-    this.exitSwapPending = false;
-    this.exitExtractPending = false;
     this.model.visible = true;
     // Browsing can resume before the return camera is fully settled. A new
     // browsing selection must not inherit the previous detail box's lift mode.
@@ -1340,14 +1318,37 @@ export class ArchiveScene {
       : THREE.MathUtils.lerp(this.reveal, this.targetReveal, blend);
     const inspecting = this.targetDetail && (!musicLibrary || this.musicPresentation.placed);
     const aligningSelection = musicLibrary && this.musicNavigationLift && this.returnY !== null;
+    const flipping = this.targetRotation > 0.001;
     this.rotation = this.reduced
-      ? inspecting ? this.targetRotation : 0
+      ? inspecting || flipping ? this.targetRotation : 0
       : inspecting && !aligningSelection
         ? THREE.MathUtils.lerp(this.rotation, this.targetRotation, blend)
-        : returnStep(this.rotation, dt, this.reduced);
+        : flipping
+          ? THREE.MathUtils.lerp(this.rotation, this.targetRotation, 1 - Math.exp(-dt * 5))
+          : returnStep(this.rotation, dt, this.reduced);
     if (musicLibrary && !cinematic) {
-      this.musicPresentation.returnWhenAligned(this.rotation === 0);
+      // Half turns (182°) count as aligned: the card is showing a face, and the
+      // reverse album face is snapped back to zero once the detail closes.
+      this.musicPresentation.returnWhenAligned(Math.abs(Math.sin(this.rotation)) < 0.01);
       this.targetDetail = Number(this.musicPresentation.holdsDetail);
+    }
+    if (
+      this.targetRotation > 0.001 &&
+      !this.musicPresentation.holdsDetail &&
+      Math.abs(this.rotation - this.targetRotation) < 0.02
+    ) {
+      const turns = Math.round(this.targetRotation / Math.PI);
+      if (turns % 2 === 1) {
+        // The album cover is showing on the reverse face; snap the equivalent
+        // front-facing orientation back to zero for the return to the shelf.
+        this.rotation = 0;
+        this.targetRotation = 0;
+        const base = this.albumFaceRecord();
+        if (base) this.covers?.paintFace("front", base);
+      } else {
+        this.rotation -= this.targetRotation;
+        this.targetRotation = 0;
+      }
     }
     const presentationProgress = musicLibrary && !cinematic
       ? THREE.MathUtils.clamp(this.musicPlacement.update(this.targetDetail, dt, this.reduced), 0, 1)
@@ -1507,18 +1508,7 @@ export class ArchiveScene {
         this.lift.velocity = 0;
       } else {
         this.returnY = null;
-        if (this.discHold) {
-          // Keep the new disc parked until the old one is fully back in the shelf.
-          this.lift = { value: 0, velocity: 0 };
-          const returning = this.discReturnGroup
-            ? this.outgoing.some((o) => o.group === this.discReturnGroup)
-            : false;
-          if (!returning || this.clock >= this.discHold.until) {
-            this.discReturnGroup = null;
-            this.discHold = null;
-            this.model.visible = true;
-          }
-        } else if (navigationLift) {
+        if (navigationLift) {
           // Placement stays at one throughout a detail switch. Giving the new
           // box its own spring lets it rise from its slot while its predecessor
           // returns, and preserves its actual height if Escape interrupts it.
@@ -1636,41 +1626,6 @@ export class ArchiveScene {
     // a missing file for one frame at the ownership handoff.
     const hidden = new Set(this.outgoing.map((o) => cellKey(o.cell)));
     hidden.add(cellKey(this.selectedCell));
-    if (this.extractCell) hidden.add(cellKey(this.extractCell));
-    if (this.exitFlow === "return-single" && this.lift.value < 0.7) {
-      // The single disc is back in the single shelf; hide it there, then let
-      // the camera settle on the album shelf with the album card restored.
-      this.model.visible = false;
-      this.extractCell = null;
-      const base = records[fileAtSlot(this.selectedSlot)];
-      if (base) {
-        this.selectedCoverUrl = base.album?.coverUrl;
-        void this.covers?.select(base);
-      }
-      this.lift = { value: 0, velocity: 0 };
-      this.exitFlow = "show-album";
-      this.exitShowAt = this.clock + 0.35;
-    }
-    if (this.exitFlow === "show-album" && this.clock >= this.exitShowAt) {
-      // Pull the album card out of the album shelf for the preview pose.
-      this.model.visible = true;
-      this.lift.value = MUSIC_PREVIEW_LIFT + 1.4;
-      this.lift.velocity = 0;
-      this.exitFlow = null;
-    }
-    if (this.exitSwapPending && (this.clock >= this.exitSwapAt || this.lift.value < 1.1)) {
-      this.exitSwapPending = false;
-      const base = records[fileAtSlot(this.selectedSlot)];
-      if (base) {
-        this.selectedCoverUrl = base.album?.coverUrl;
-        void this.covers?.select(base);
-      }
-    }
-    if (this.exitExtractPending && !this.musicPresentation.holdsDetail && this.lift.value < 0.9) {
-      this.exitExtractPending = false;
-      this.lift.value = MUSIC_PREVIEW_LIFT + 1.4;
-      this.lift.velocity = 0;
-    }
     this.model.position.set(
       chosen.x - trackX,
       chosen.y + field(selectedRow, selectedLane) + this.lift.value,

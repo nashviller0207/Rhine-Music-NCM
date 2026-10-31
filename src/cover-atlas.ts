@@ -140,13 +140,17 @@ function paintCover(
 export class CoverAtlas {
   readonly arrays: THREE.InstancedMesh[] = [];
   readonly selected: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>;
+  readonly selectedBack: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshLambertMaterial>;
   private readonly selectedCanvas = document.createElement("canvas");
+  private readonly selectedBackCanvas = document.createElement("canvas");
   private readonly tileCanvas = document.createElement("canvas");
   private readonly selectedContext: CanvasRenderingContext2D;
+  private readonly selectedBackContext: CanvasRenderingContext2D;
   private readonly tileContext: CanvasRenderingContext2D;
   private readonly pages: AtlasPage[] = [];
   private readonly arrayGeometry: THREE.PlaneGeometry;
   private readonly selectedTexture: THREE.CanvasTexture;
+  private readonly selectedBackTexture: THREE.CanvasTexture;
   private readonly selectedAnisotropy: number;
   private readonly tileSource: THREE.CanvasTexture;
   private readonly pendingImages = new Map<string, Promise<CoverImage | undefined>>();
@@ -161,6 +165,7 @@ export class CoverAtlas {
   private selectedRecord?: ArchiveRecord;
   private selectedKey?: string;
   private selectedCanvasKey?: string;
+  private selectedBackKey?: string;
   private generation = 0;
   private disposed = false;
   private readonly instancesPerPage: number;
@@ -188,11 +193,14 @@ export class CoverAtlas {
     this.tileCanvas.height = this.tileHeight;
     this.selectedCanvas.width = COVER_PAINT_SIZE;
     this.selectedCanvas.height = COVER_PAINT_SIZE;
+    this.selectedBackCanvas.width = COVER_PAINT_SIZE;
+    this.selectedBackCanvas.height = COVER_PAINT_SIZE;
     // Interactive atlas updates upload this canvas directly to WebGL. Keep the
     // normal accelerated 2D context; forcing frequent CPU reads here pins it to
     // software and makes canvas-to-texture uploads much slower.
     this.tileContext = this.tileCanvas.getContext("2d")!;
     this.selectedContext = this.selectedCanvas.getContext("2d")!;
+    this.selectedBackContext = this.selectedBackCanvas.getContext("2d")!;
     this.atlasCopyRegion = new THREE.Box2(
       new THREE.Vector2(0, 0),
       new THREE.Vector2(this.tileWidth, this.tileHeight),
@@ -209,6 +217,7 @@ export class CoverAtlas {
     this.visibleSlots = new Uint8Array(count);
     this.selectedAnisotropy = Math.min(8, anisotropy);
     this.selectedTexture = this.createCanvasTexture(this.selectedCanvas, this.selectedAnisotropy);
+    this.selectedBackTexture = this.createCanvasTexture(this.selectedBackCanvas, this.selectedAnisotropy);
     this.arrayGeometry = new THREE.PlaneGeometry(
       COVER_SIZE.width,
       COVER_SIZE.height,
@@ -295,6 +304,16 @@ export class CoverAtlas {
     this.selected.visible = false;
     this.selected.name = "Selected album cover";
     this.selected.receiveShadow = true;
+    // Reverse face of the same card: the selected single's own print.
+    const backGeometry = new THREE.PlaneGeometry(COVER_SIZE.width, COVER_SIZE.height);
+    const backMaterial = makePrint(this.selectedBackTexture);
+    this.selectedBack = new THREE.Mesh(backGeometry, backMaterial);
+    this.selectedBack.userData.albumCover = true;
+    this.selectedBack.position.set(COVER_SIZE.x, COVER_SIZE.y, -COVER_SIZE.z);
+    this.selectedBack.rotation.y = Math.PI;
+    this.selectedBack.visible = false;
+    this.selectedBack.name = "Selected album cover (back)";
+    this.selectedBack.receiveShadow = true;
   }
 
   private cachedImage(url?: string) {
@@ -634,6 +653,31 @@ export class CoverAtlas {
     material.map = this.createCanvasTexture(canvas, this.selectedAnisotropy);
     material.needsUpdate = true;
     mesh.material = material;
+  }
+
+  /** Paint either the front or the reverse face of the lifted card directly. */
+  paintFace(face: "front" | "back", record: ArchiveRecord | undefined) {
+    const paint = (image?: CoverImage) => {
+      if (face === "front") {
+        paintCover(this.selectedCanvas, record, image);
+        this.selectedCanvasKey = this.recordKey(record);
+        this.selectedKey = this.selectedCanvasKey;
+        this.selectedRecord = record;
+        this.selectFallbackTexture();
+        this.selectedTexture.needsUpdate = true;
+      } else {
+        paintCover(this.selectedBackCanvas, record, image);
+        this.selectedBackKey = this.recordKey(record);
+        this.selectedBackTexture.needsUpdate = true;
+      }
+    };
+    const url = record?.album?.coverUrl;
+    const cached = this.cachedImage(url);
+    paint(cached);
+    if (cached || !url) return;
+    void this.loadImage(url).then((image) => {
+      if (image && !this.disposed) paint(image);
+    });
   }
 
   /** Decode artwork ahead of a cover switch so select() can paint synchronously. */

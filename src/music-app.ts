@@ -166,6 +166,9 @@ let albums: MusicAlbum[] = [],
 let mode: "archive" | "detail" = "archive",
   activeTab: "tracks" | "about" = "tracks",
   panel: Panel = null;
+// Opening an album always shows its cover first; only a clicked single flips it.
+let detailTrackPicked = false;
+let detailTrackFlip = false;
 let scene: ArchiveScene | undefined,
   ready = false,
   apiAvailable = true,
@@ -726,10 +729,15 @@ function syncDetailCover() {
     const track = playerState?.currentTrack;
     const belongs = !!track && album.tracks.some((t) => t.id === track.id);
     const url =
-      (mode === "detail" && belongs && track.coverUrl) || album.coverUrl || "";
-    if (!url || url === appliedDetailCoverUrl) return;
+      (mode === "detail" && detailTrackPicked && belongs && track.coverUrl) ||
+      album.coverUrl ||
+      "";
+    if (!url) return;
+    const forceFlip = detailTrackFlip;
+    if (!forceFlip && url === appliedDetailCoverUrl) return;
     appliedDetailCoverUrl = url;
-    scene.setSelectedCover(url);
+    detailTrackFlip = false;
+    scene.setSelectedCover(url, forceFlip);
   }, 60);
 }
 
@@ -925,8 +933,12 @@ function setMode(next: "archive" | "detail") {
   }
   if (libraryRebuilding) { libraryIntent = { mode: next }; return; }
   if (next === "detail") {
+    detailTrackPicked = false;
     if (currentAlbum()) presentation.open();
-  } else presentation.back();
+  } else {
+    detailTrackPicked = false;
+    presentation.back();
+  }
 }
 function syncTabIndicator(animate = true) {
   const button = document.querySelector<HTMLElement>(`#tab-${activeTab}`);
@@ -2014,6 +2026,8 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (target.dataset.track) {
+    detailTrackPicked = true;
+    detailTrackFlip = true;
     playAlbum(target.dataset.track);
     return;
   }
