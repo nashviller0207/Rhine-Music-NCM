@@ -1,7 +1,7 @@
 {
   "baseVersion": "0.6.0",
   "channel": "dev",
-  "sequence": 81,
-  "version": "0.6.0-dev.81",
+  "sequence": 82,
+  "version": "0.6.0-dev.82",
   "dataSchema": "music-data-v3"
 }

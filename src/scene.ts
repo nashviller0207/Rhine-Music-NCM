@@ -161,6 +161,10 @@ export class ArchiveScene {
   } | null = null;
   /** Neighbouring shelf slot the camera moves to for the next disc. */
   private extractCell: { lane: number; row: number } | null = null;
+  /** Return-to-shelf choreography after leaving the detail view. */
+  private exitReturn = false;
+  private exitReturnStart = 0;
+  private exitCoverPending = false;
   private selectionLighting?: MusicSelectionLighting;
   private theme: "day" | "night" | "dusk" = "day";
   private themeWarmth = { value: 1 };
@@ -535,6 +539,8 @@ export class ArchiveScene {
     this.selectedCoverUrl = undefined;
     this.discHold = null;
     this.extractCell = null;
+    this.exitReturn = false;
+    this.exitCoverPending = false;
     this.returnY = null;
     this.pulses = [];
     this.pendingPulse = null;
@@ -708,8 +714,13 @@ export class ArchiveScene {
   setMode(mode: "hidden" | "archive" | "detail") {
     if (mode !== "detail") {
       this.discHold = null;
-      this.extractCell = null;
       this.model.visible = true;
+      this.musicNavigationLift = false;
+      if (this.extractCell) {
+        this.exitReturn = true;
+        this.exitReturnStart = this.clock;
+      }
+      this.exitCoverPending = true;
     }
     if (musicLibrary) this.musicPresentation.request(mode);
     if (musicLibrary && mode === "hidden") {
@@ -995,6 +1006,8 @@ export class ArchiveScene {
     if (!records[index]) return;
     this.discHold = null;
     this.extractCell = null;
+    this.exitReturn = false;
+    this.exitCoverPending = false;
     this.model.visible = true;
     // Browsing can resume before the return camera is fully settled. A new
     // browsing selection must not inherit the previous detail box's lift mode.
@@ -1623,11 +1636,28 @@ export class ArchiveScene {
     const hidden = new Set(this.outgoing.map((o) => cellKey(o.cell)));
     hidden.add(cellKey(this.selectedCell));
     if (this.extractCell) hidden.add(cellKey(this.extractCell));
+    // While returning to the archive, ease the camera/slot offset back out.
+    const extractScale = this.exitReturn
+      ? THREE.MathUtils.clamp(1 - (this.clock - this.exitReturnStart) / 0.65, 0, 1)
+      : 1;
+    if (this.exitReturn && extractScale <= 0) {
+      this.extractCell = null;
+      this.exitReturn = false;
+    }
+    if (this.exitCoverPending && this.lift.value <= MUSIC_PREVIEW_LIFT + 0.3) {
+      // The single disc is back in the shelf: show the album art again.
+      this.exitCoverPending = false;
+      const base = records[fileAtSlot(this.selectedSlot)];
+      if (base) {
+        this.selectedCoverUrl = base.album?.coverUrl;
+        void this.covers?.select(base);
+      }
+    }
     const extractDx = this.extractCell
-      ? (this.extractCell.lane - this.selectedCell.lane) * COLUMN_SPACING
+      ? (this.extractCell.lane - this.selectedCell.lane) * COLUMN_SPACING * extractScale
       : 0;
     const extractDz = this.extractCell
-      ? (this.extractCell.row - this.selectedCell.row) * ROW_SPACING
+      ? (this.extractCell.row - this.selectedCell.row) * ROW_SPACING * extractScale
       : 0;
     this.model.position.set(
       chosen.x - trackX + extractDx,
