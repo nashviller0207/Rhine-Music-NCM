@@ -153,12 +153,14 @@ export class ArchiveScene {
   private stars?: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
   private covers?: CoverAtlas;
   private selectedCoverUrl?: string;
-  /** Detail-view cover switch: hold the new disc until the old one has returned. */
-  private discHold: { until: number } | null = null;
-  /** Lateral offset used to pull the new disc from a neighbouring slot. */
-  private extractShiftX = 0;
-  private extractShiftZ = 0;
-  private extractShiftSide = 1;
+  /** Detail-view cover switch: return the old disc, pan the camera, then lift the new one. */
+  private discHold: {
+    stage: "return" | "pan";
+    until: number;
+    next: { lane: number; row: number };
+  } | null = null;
+  /** Neighbouring shelf slot the camera moves to for the next disc. */
+  private extractCell: { lane: number; row: number } | null = null;
   private selectionLighting?: MusicSelectionLighting;
   private theme: "day" | "night" | "dusk" = "day";
   private themeWarmth = { value: 1 };
@@ -532,8 +534,7 @@ export class ArchiveScene {
     this.rotation = this.targetRotation = 0;
     this.selectedCoverUrl = undefined;
     this.discHold = null;
-    this.extractShiftX = 0;
-    this.extractShiftZ = 0;
+    this.extractCell = null;
     this.returnY = null;
     this.pulses = [];
     this.pendingPulse = null;
@@ -707,8 +708,7 @@ export class ArchiveScene {
   setMode(mode: "hidden" | "archive" | "detail") {
     if (mode !== "detail") {
       this.discHold = null;
-      this.extractShiftX = 0;
-      this.extractShiftZ = 0;
+      this.extractCell = null;
       this.model.visible = true;
     }
     if (musicLibrary) this.musicPresentation.request(mode);
@@ -936,6 +936,14 @@ export class ArchiveScene {
       if (this.selectedCoverUrl !== url) return;
       this.discHold = null;
       this.model.visible = true;
+      const currentCell = this.extractCell ?? this.selectedCell;
+      const nextCell = {
+        lane:
+          currentCell.lane === this.selectedCell.lane + 1
+            ? this.selectedCell.lane - 1
+            : this.selectedCell.lane + 1,
+        row: this.selectedCell.row,
+      };
       const outgoing = this.model.clone(true);
       this.appearance.prepare(outgoing);
       const cover = outgoing.children.find(
@@ -948,17 +956,14 @@ export class ArchiveScene {
       this.outgoing.push({
         group: outgoing,
         slot: this.selectedSlot,
-        cell: { ...this.selectedCell },
+        cell: { ...currentCell },
         lift: { ...this.lift },
         returnY: outgoing.rotation.y !== 0 ? outgoing.position.y : null,
         clarity: this.decryption.clarity,
       });
-      // The next disc waits until the old one is back, then slides in from a
-      // neighbouring shelf slot (lateral offset decaying to zero) and rises.
-      this.extractShiftSide = this.extractShiftSide >= 0 ? -1 : 1;
-      this.extractShiftX = COLUMN_SPACING * 1.25 * this.extractShiftSide;
-      this.extractShiftZ = 0;
-      this.discHold = { until: this.clock + 0.5 };
+      // First the old disc goes back, then the camera pans to the neighbouring
+      // slot, and only then does the new disc rise straight up from there.
+      this.discHold = { stage: "return", until: this.clock + 0.55, next: nextCell };
       this.model.visible = false;
       this.lift = { value: 0, velocity: 0 };
       this.musicNavigationLift = true;
@@ -989,8 +994,7 @@ export class ArchiveScene {
   select(index: number, navigation?: ArchiveNavigation) {
     if (!records[index]) return;
     this.discHold = null;
-    this.extractShiftX = 0;
-    this.extractShiftZ = 0;
+    this.extractCell = null;
     this.model.visible = true;
     // Browsing can resume before the return camera is fully settled. A new
     // browsing selection must not inherit the previous detail box's lift mode.
@@ -1489,11 +1493,16 @@ export class ArchiveScene {
       } else {
         this.returnY = null;
         if (this.discHold) {
-          // The previous disc is returning; the new one waits in its slot.
+          // Keep the new disc parked while the old one returns and the camera pans.
           this.lift = { value: 0, velocity: 0 };
           if (this.clock >= this.discHold.until) {
-            this.discHold = null;
-            this.model.visible = true;
+            if (this.discHold.stage === "return") {
+              this.extractCell = this.discHold.next;
+              this.discHold = { stage: "pan", until: this.clock + 1.0, next: this.discHold.next };
+            } else {
+              this.discHold = null;
+              this.model.visible = true;
+            }
           }
         } else if (navigationLift) {
           // Placement stays at one throughout a detail switch. Giving the new
@@ -1613,17 +1622,17 @@ export class ArchiveScene {
     // a missing file for one frame at the ownership handoff.
     const hidden = new Set(this.outgoing.map((o) => cellKey(o.cell)));
     hidden.add(cellKey(this.selectedCell));
-    if (!this.discHold && (this.extractShiftX !== 0 || this.extractShiftZ !== 0)) {
-      const decay = Math.exp(-dt * 3.6);
-      this.extractShiftX *= decay;
-      this.extractShiftZ *= decay;
-      if (Math.abs(this.extractShiftX) < 0.002) this.extractShiftX = 0;
-      if (Math.abs(this.extractShiftZ) < 0.002) this.extractShiftZ = 0;
-    }
+    if (this.extractCell) hidden.add(cellKey(this.extractCell));
+    const extractDx = this.extractCell
+      ? (this.extractCell.lane - this.selectedCell.lane) * COLUMN_SPACING
+      : 0;
+    const extractDz = this.extractCell
+      ? (this.extractCell.row - this.selectedCell.row) * ROW_SPACING
+      : 0;
     this.model.position.set(
-      chosen.x - trackX + this.extractShiftX,
+      chosen.x - trackX + extractDx,
       chosen.y + field(selectedRow, selectedLane) + this.lift.value,
-      chosen.z + entryZ + this.rail.value + this.extractShiftZ,
+      chosen.z + entryZ + this.rail.value + extractDz,
     );
     // Extraction only changes elevation. Reframing belongs to the camera.
     this.model.rotation.set(
@@ -1816,6 +1825,10 @@ export class ArchiveScene {
       const detailX = musicLibrary ? framing.portrait ? 0.5 : 0.25 : framing.detailX;
       detailAim.addScaledVector(right, (0.5 - detailX) * width / pixelScale);
       detailAim.addScaledVector(up, (framing.detailY - 0.5) * height / pixelScale);
+      // Track switches move the camera to the neighbouring shelf slot instead
+      // of sliding the new disc sideways through the current row.
+      detailAim.x += extractDx;
+      detailAim.z += extractDz;
       cameraAim.lerp(detailAim, detail);
     }
     const cameraPosition = cameraAim

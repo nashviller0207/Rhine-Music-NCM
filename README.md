@@ -4,7 +4,7 @@
 >
 > A third-party NetEase Cloud Music player with a RHINE LAB terminal-inspired 3D interface.
 
-**当前版本：0.6.0-dev.80**
+**当前版本：0.6.0-dev.81**
 
 ---
 
