@@ -164,7 +164,9 @@ export class ArchiveScene {
   /** Return-to-shelf choreography after leaving the detail view. */
   private exitReturn = false;
   private exitReturnStart = 0;
-  private exitCoverPending = false;
+  private exitSwapPending = false;
+  private exitSwapAt = 0;
+  private exitExtractPending = false;
   private selectionLighting?: MusicSelectionLighting;
   private theme: "day" | "night" | "dusk" = "day";
   private themeWarmth = { value: 1 };
@@ -540,7 +542,8 @@ export class ArchiveScene {
     this.discHold = null;
     this.extractCell = null;
     this.exitReturn = false;
-    this.exitCoverPending = false;
+    this.exitSwapPending = false;
+    this.exitExtractPending = false;
     this.returnY = null;
     this.pulses = [];
     this.pendingPulse = null;
@@ -720,7 +723,11 @@ export class ArchiveScene {
         this.exitReturn = true;
         this.exitReturnStart = this.clock;
       }
-      this.exitCoverPending = true;
+      // Put the single disc back first, then turn it into the album card before
+      // it settles so the album shelf never gains a single-cover card.
+      this.exitSwapPending = true;
+      this.exitSwapAt = this.clock + 0.35;
+      this.exitExtractPending = true;
     }
     if (musicLibrary) this.musicPresentation.request(mode);
     if (musicLibrary && mode === "hidden") {
@@ -1007,7 +1014,8 @@ export class ArchiveScene {
     this.discHold = null;
     this.extractCell = null;
     this.exitReturn = false;
-    this.exitCoverPending = false;
+    this.exitSwapPending = false;
+    this.exitExtractPending = false;
     this.model.visible = true;
     // Browsing can resume before the return camera is fully settled. A new
     // browsing selection must not inherit the previous detail box's lift mode.
@@ -1644,14 +1652,21 @@ export class ArchiveScene {
       this.extractCell = null;
       this.exitReturn = false;
     }
-    if (this.exitCoverPending && this.lift.value <= MUSIC_PREVIEW_LIFT + 0.3) {
-      // The single disc is back in the shelf: show the album art again.
-      this.exitCoverPending = false;
+    if (this.exitSwapPending && (this.clock >= this.exitSwapAt || this.lift.value < 1.1)) {
+      // The single disc has been put back: the card becomes the album card
+      // before it settles, so the album shelf only ever shows album art.
+      this.exitSwapPending = false;
       const base = records[fileAtSlot(this.selectedSlot)];
       if (base) {
         this.selectedCoverUrl = base.album?.coverUrl;
         void this.covers?.select(base);
       }
+    }
+    if (this.exitExtractPending && !this.musicPresentation.holdsDetail && this.lift.value < 0.9) {
+      // Back on the album shelf, pull the album card out a little once more.
+      this.exitExtractPending = false;
+      this.lift.value = MUSIC_PREVIEW_LIFT + 1.4;
+      this.lift.velocity = 0;
     }
     const extractDx = this.extractCell
       ? (this.extractCell.lane - this.selectedCell.lane) * COLUMN_SPACING * extractScale
