@@ -155,6 +155,10 @@ export class ArchiveScene {
   private selectedCoverUrl?: string;
   /** Detail-view cover switch: hold the new disc until the old one has returned. */
   private discHold: { until: number } | null = null;
+  /** Lateral offset used to pull the new disc from a neighbouring slot. */
+  private extractShiftX = 0;
+  private extractShiftZ = 0;
+  private extractShiftSide = 1;
   private selectionLighting?: MusicSelectionLighting;
   private theme: "day" | "night" | "dusk" = "day";
   private themeWarmth = { value: 1 };
@@ -528,6 +532,8 @@ export class ArchiveScene {
     this.rotation = this.targetRotation = 0;
     this.selectedCoverUrl = undefined;
     this.discHold = null;
+    this.extractShiftX = 0;
+    this.extractShiftZ = 0;
     this.returnY = null;
     this.pulses = [];
     this.pendingPulse = null;
@@ -701,6 +707,8 @@ export class ArchiveScene {
   setMode(mode: "hidden" | "archive" | "detail") {
     if (mode !== "detail") {
       this.discHold = null;
+      this.extractShiftX = 0;
+      this.extractShiftZ = 0;
       this.model.visible = true;
     }
     if (musicLibrary) this.musicPresentation.request(mode);
@@ -945,7 +953,11 @@ export class ArchiveScene {
         returnY: outgoing.rotation.y !== 0 ? outgoing.position.y : null,
         clarity: this.decryption.clarity,
       });
-      // Keep the new disc in its slot until the previous one is back in the shelf.
+      // The next disc waits until the old one is back, then slides in from a
+      // neighbouring shelf slot (lateral offset decaying to zero) and rises.
+      this.extractShiftSide = this.extractShiftSide >= 0 ? -1 : 1;
+      this.extractShiftX = COLUMN_SPACING * 1.25 * this.extractShiftSide;
+      this.extractShiftZ = 0;
       this.discHold = { until: this.clock + 0.5 };
       this.model.visible = false;
       this.lift = { value: 0, velocity: 0 };
@@ -977,6 +989,8 @@ export class ArchiveScene {
   select(index: number, navigation?: ArchiveNavigation) {
     if (!records[index]) return;
     this.discHold = null;
+    this.extractShiftX = 0;
+    this.extractShiftZ = 0;
     this.model.visible = true;
     // Browsing can resume before the return camera is fully settled. A new
     // browsing selection must not inherit the previous detail box's lift mode.
@@ -1599,10 +1613,17 @@ export class ArchiveScene {
     // a missing file for one frame at the ownership handoff.
     const hidden = new Set(this.outgoing.map((o) => cellKey(o.cell)));
     hidden.add(cellKey(this.selectedCell));
+    if (!this.discHold && (this.extractShiftX !== 0 || this.extractShiftZ !== 0)) {
+      const decay = Math.exp(-dt * 3.6);
+      this.extractShiftX *= decay;
+      this.extractShiftZ *= decay;
+      if (Math.abs(this.extractShiftX) < 0.002) this.extractShiftX = 0;
+      if (Math.abs(this.extractShiftZ) < 0.002) this.extractShiftZ = 0;
+    }
     this.model.position.set(
-      chosen.x - trackX,
+      chosen.x - trackX + this.extractShiftX,
       chosen.y + field(selectedRow, selectedLane) + this.lift.value,
-      chosen.z + entryZ + this.rail.value,
+      chosen.z + entryZ + this.rail.value + this.extractShiftZ,
     );
     // Extraction only changes elevation. Reframing belongs to the camera.
     this.model.rotation.set(
