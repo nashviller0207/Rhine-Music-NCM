@@ -162,8 +162,8 @@ export class ArchiveScene {
   /** Neighbouring shelf slot the camera moves to for the next disc. */
   private extractCell: { lane: number; row: number } | null = null;
   /** Return-to-shelf choreography after leaving the detail view. */
-  private exitReturn = false;
-  private exitReturnStart = 0;
+  private exitFlow: "return-single" | "show-album" | null = null;
+  private exitShowAt = 0;
   private exitSwapPending = false;
   private exitSwapAt = 0;
   private exitExtractPending = false;
@@ -541,7 +541,7 @@ export class ArchiveScene {
     this.selectedCoverUrl = undefined;
     this.discHold = null;
     this.extractCell = null;
-    this.exitReturn = false;
+    this.exitFlow = null;
     this.exitSwapPending = false;
     this.exitExtractPending = false;
     this.returnY = null;
@@ -720,14 +720,14 @@ export class ArchiveScene {
       this.model.visible = true;
       this.musicNavigationLift = false;
       if (this.extractCell) {
-        this.exitReturn = true;
-        this.exitReturnStart = this.clock;
+        // The disc goes back into the single shelf it came from; only then the
+        // camera returns to the album shelf and the album card is pulled out.
+        this.exitFlow = "return-single";
+      } else {
+        this.exitSwapPending = true;
+        this.exitSwapAt = this.clock + 0.35;
+        this.exitExtractPending = true;
       }
-      // Put the single disc back first, then turn it into the album card before
-      // it settles so the album shelf never gains a single-cover card.
-      this.exitSwapPending = true;
-      this.exitSwapAt = this.clock + 0.35;
-      this.exitExtractPending = true;
     }
     if (musicLibrary) this.musicPresentation.request(mode);
     if (musicLibrary && mode === "hidden") {
@@ -1013,7 +1013,7 @@ export class ArchiveScene {
     if (!records[index]) return;
     this.discHold = null;
     this.extractCell = null;
-    this.exitReturn = false;
+    this.exitFlow = null;
     this.exitSwapPending = false;
     this.exitExtractPending = false;
     this.model.visible = true;
@@ -1644,17 +1644,28 @@ export class ArchiveScene {
     const hidden = new Set(this.outgoing.map((o) => cellKey(o.cell)));
     hidden.add(cellKey(this.selectedCell));
     if (this.extractCell) hidden.add(cellKey(this.extractCell));
-    // While returning to the archive, ease the camera/slot offset back out.
-    const extractScale = this.exitReturn
-      ? THREE.MathUtils.clamp(1 - (this.clock - this.exitReturnStart) / 0.65, 0, 1)
-      : 1;
-    if (this.exitReturn && extractScale <= 0) {
+    if (this.exitFlow === "return-single" && this.lift.value < 0.7) {
+      // The single disc is back in the single shelf; hide it there, then let
+      // the camera settle on the album shelf with the album card restored.
+      this.model.visible = false;
       this.extractCell = null;
-      this.exitReturn = false;
+      const base = records[fileAtSlot(this.selectedSlot)];
+      if (base) {
+        this.selectedCoverUrl = base.album?.coverUrl;
+        void this.covers?.select(base);
+      }
+      this.lift = { value: 0, velocity: 0 };
+      this.exitFlow = "show-album";
+      this.exitShowAt = this.clock + 0.35;
+    }
+    if (this.exitFlow === "show-album" && this.clock >= this.exitShowAt) {
+      // Pull the album card out of the album shelf for the preview pose.
+      this.model.visible = true;
+      this.lift.value = MUSIC_PREVIEW_LIFT + 1.4;
+      this.lift.velocity = 0;
+      this.exitFlow = null;
     }
     if (this.exitSwapPending && (this.clock >= this.exitSwapAt || this.lift.value < 1.1)) {
-      // The single disc has been put back: the card becomes the album card
-      // before it settles, so the album shelf only ever shows album art.
       this.exitSwapPending = false;
       const base = records[fileAtSlot(this.selectedSlot)];
       if (base) {
@@ -1663,16 +1674,15 @@ export class ArchiveScene {
       }
     }
     if (this.exitExtractPending && !this.musicPresentation.holdsDetail && this.lift.value < 0.9) {
-      // Back on the album shelf, pull the album card out a little once more.
       this.exitExtractPending = false;
       this.lift.value = MUSIC_PREVIEW_LIFT + 1.4;
       this.lift.velocity = 0;
     }
     const extractDx = this.extractCell
-      ? (this.extractCell.lane - this.selectedCell.lane) * COLUMN_SPACING * extractScale
+      ? (this.extractCell.lane - this.selectedCell.lane) * COLUMN_SPACING
       : 0;
     const extractDz = this.extractCell
-      ? (this.extractCell.row - this.selectedCell.row) * ROW_SPACING * extractScale
+      ? (this.extractCell.row - this.selectedCell.row) * ROW_SPACING
       : 0;
     this.model.position.set(
       chosen.x - trackX + extractDx,
