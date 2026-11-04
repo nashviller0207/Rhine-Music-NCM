@@ -166,6 +166,18 @@ export class CoverAtlas {
   private selectedKey?: string;
   private selectedCanvasKey?: string;
   private selectedBackKey?: string;
+  // Covers that still need painting; spread across frames to avoid one long hitch.
+  private pendingTiles = new Map<number, { key: string; record?: ArchiveRecord; pageIndex: number; tile: number }>();
+  private paintBudget = Number.POSITIVE_INFINITY;
+  private paintMs = 0;
+  private paintCount = 0;
+  get paintStats() {
+    return { ms: Math.round(this.paintMs), count: this.paintCount };
+  }
+  resetPaintStats() {
+    this.paintMs = 0;
+    this.paintCount = 0;
+  }
   private generation = 0;
   private disposed = false;
   private readonly instancesPerPage: number;
@@ -198,7 +210,9 @@ export class CoverAtlas {
     // Interactive atlas updates upload this canvas directly to WebGL. Keep the
     // normal accelerated 2D context; forcing frequent CPU reads here pins it to
     // software and makes canvas-to-texture uploads much slower.
-    this.tileContext = this.tileCanvas.getContext("2d")!;
+    // Tile painting reads the small canvas back into the atlas page, so keep it
+    // on the CPU-backed path; the GPU-canvas path made every tile a slow readback.
+    this.tileContext = this.tileCanvas.getContext("2d", { willReadFrequently: true })!;
     this.selectedContext = this.selectedCanvas.getContext("2d")!;
     this.selectedBackContext = this.selectedBackCanvas.getContext("2d")!;
     this.atlasCopyRegion = new THREE.Box2(
@@ -619,6 +633,48 @@ export class CoverAtlas {
     }
   }
 
+  /** Allows at most this many new covers to be painted in the current frame. */
+  beginFrame(budget: number) {
+    this.paintBudget = budget;
+  }
+
+  isPendingSlot(slot: number) {
+    return this.pendingTiles.has(slot);
+  }
+
+  private paintSlotTile(
+    slot: number,
+    key: string,
+    record: ArchiveRecord | undefined,
+    pageIndex: number,
+    tile: number,
+  ) {
+    this.slotKeys[slot] = key;
+    const generation = this.generation;
+    const image = this.cachedImage(record?.album?.coverUrl);
+    const paintStarted = performance.now();
+    this.drawPageTile(pageIndex, tile, key, record, image, generation);
+    this.paintMs += performance.now() - paintStarted;
+    this.paintCount++;
+    if (this.selectedKey === key) this.selectAtlasSlot(slot);
+    if (!image && record?.album?.coverUrl)
+      void this.loadImage(record.album.coverUrl).then((loaded) => {
+        if (loaded) this.drawPageTile(pageIndex, tile, key, record, loaded, generation);
+      });
+  }
+
+  /** Continue deferred cover painting at the start of every frame. */
+  flushPending() {
+    while (this.paintBudget > 0 && this.pendingTiles.size) {
+      const first = this.pendingTiles.entries().next().value;
+      if (!first) break;
+      const [slot, entry] = first;
+      this.pendingTiles.delete(slot);
+      this.paintBudget--;
+      this.paintSlotTile(slot, entry.key, entry.record, entry.pageIndex, entry.tile);
+    }
+  }
+
   setSlot(slot: number, record: ArchiveRecord | undefined, visible = true) {
     // Camera-hidden tiles cannot affect the current image. Keep their previous
     // contents until they enter view, avoiding canvas repaints and atlas uploads
@@ -627,20 +683,18 @@ export class CoverAtlas {
     const key = this.recordKey(record);
     this.slotRecords[slot] = record;
     if (this.slotKeys[slot] === key) return;
+    if (this.pendingTiles.get(slot)?.key === key) return;
     const pageIndex = Math.floor(slot / this.instancesPerPage);
     const localSlot = slot % this.instancesPerPage;
     const page = this.pages[pageIndex];
     if (!page) return;
     const tile = this.assignPageSlot(page, localSlot, key);
-    this.slotKeys[slot] = key;
-    const generation = this.generation;
-    const image = this.cachedImage(record?.album?.coverUrl);
-    this.drawPageTile(pageIndex, tile, key, record, image, generation);
-    if (this.selectedKey === key) this.selectAtlasSlot(slot);
-    if (!image && record?.album?.coverUrl)
-      void this.loadImage(record.album.coverUrl).then((loaded) => {
-        if (loaded) this.drawPageTile(pageIndex, tile, key, record, loaded, generation);
-      });
+    if (this.paintBudget <= 0) {
+      this.pendingTiles.set(slot, { key, record, pageIndex, tile });
+      return;
+    }
+    this.paintBudget--;
+    this.paintSlotTile(slot, key, record, pageIndex, tile);
   }
 
   /** Copy the current selected cover art onto a cloned card (outgoing disc). */
@@ -778,7 +832,7 @@ export class CoverAtlas {
     });
   }
 
-  reset() {
+  reset(preserveImages = false) {
     this.generation++;
     this.slotKeys.fill(undefined);
     this.slotRecords.fill(undefined);
@@ -790,12 +844,15 @@ export class CoverAtlas {
       page.renderedKeys.fill(undefined);
       page.contentStates.fill(0);
     }
+    this.pendingTiles.clear();
     this.selectedRecord = undefined;
     this.selectedKey = undefined;
     this.selectedCanvasKey = undefined;
-    this.pendingImages.clear();
-    this.decodedImages.clear();
-    this.imageErrors.clear();
+    if (!preserveImages) {
+      this.pendingImages.clear();
+      this.decodedImages.clear();
+      this.imageErrors.clear();
+    }
   }
 
   /** On-demand runtime diagnostics for the isolated EXE repro harness. */

@@ -9,7 +9,7 @@
 | Windows 版开发与维护 | **Copyright (c) 2026 Bong712**。包括 Windows 桌面宿主、Windows 版构建和本移植版本新增或修改的代码；不主张对上游代码或第三方素材享有原创权利。 |
 | Rhine-Music-Demo 上游音乐适配 | **Copyright (c) 2026 RonaldDeng**。本项目从 [RonaldDeng/Rhine-Music-Demo](https://github.com/RonaldDeng/Rhine-Music-Demo) 继承音乐库与播放服务、专辑模型适配、音乐界面和相关修改；保留其原始署名。 |
 | 原版 RhineLabUI | **Copyright (c) 2026 LBEILC（@路北路陈）**。[原仓库](https://github.com/LBEILC/RhineLabUI)，初始基于提交 [`5abab02367465d9189f4ae65bcb6f17fdb5938f7`](https://github.com/LBEILC/RhineLabUI/tree/5abab02367465d9189f4ae65bcb6f17fdb5938f7)。保留其三维档案界面、渲染与动效基础、建模脚本、资料说明和 Git 历史。 |
-| 本仓库的网易云定制 | 社区二次开发版维护者。基于 Bong712 的 Windows 版修改，新增网易云账号歌单/收藏接入、在线搜索、单曲架、播放联动封面、内嵌完整歌词与默认封面等；不主张对上游代码及第三方素材的原创权利。 |
+| 本仓库的网易云定制 | **@Nashviller0207**（[Rhine-Music-NCM](https://github.com/Nashviller0207/Rhine-Music-NCM)）。基于 Bong712 的 Windows 版修改，新增网易云账号歌单/收藏接入、在线搜索、单曲架、播放联动封面、内嵌完整歌词与默认封面、专辑卡翻面与架子滑入动画、网易云连接状态提示等；不主张对上游代码及第三方素材的原创权利。 |
 | UI 概念参考视频 | **@Ronald没有魔杖**，Bilibili：[BV1XBaK6pECN](https://www.bilibili.com/video/BV1XBaK6pECN/?spm_id_from=333.1387.homepage.video_card.click&vd_source=da40ab32db7ab4df771e94bfea6163b3)。仅作为界面风格与动效的创作参考；视频及其中的画面、声音权利归原作者及相应权利人所有。 |
 
 有权授权的程序代码、建模脚本和技术文档沿用 [MIT License](LICENSE)，保留以上各项署名。分发代码或其重要部分时须一并保留版权声明及完整许可证；Windows 移植版署名不取代任何上游署名。MIT 允许使用、修改及商业分发，软件按原样提供；本说明不在 MIT 上另加用途限制。具体以许可证原文为准，参见 [MIT 许可说明](https://choosealicense.com/licenses/mit/)。

@@ -4,7 +4,7 @@
 >
 > A third-party NetEase Cloud Music player with a RHINE LAB terminal-inspired 3D interface.
 
-**当前版本：0.6.0-dev.86**
+**当前版本：0.6.0-dev.92**
 
 ---
 
@@ -17,7 +17,8 @@
 | **RhineLabUI** | **@路北路陈（LBEILC）** | 三维档案界面、渲染与动效基础（MIT） | <https://github.com/LBEILC/RhineLabUI> |
 | **UI 概念参考视频** | **@Ronald没有魔杖** | 本界面风格的创作参考与灵感来源 | <https://www.bilibili.com/video/BV1XBaK6pECN/?spm_id_from=333.1387.homepage.video_card.click&vd_source=da40ab32db7ab4df771e94bfea6163b3> |
 | Rhine-Music-Demo | @RonaldDeng | 音乐库与播放服务、专辑模型、音乐界面（MIT） | <https://github.com/RonaldDeng/Rhine-Music-Demo> |
-| Rhine-Music-Windows | @Bong712 | Windows 桌面宿主、WebView2 + 内置 Node 服务、打包方案（MIT）；本仓库的代码基点 | <https://github.com/Bong712/Rhine-Music-Windows> |
+| Rhine-Music-Windows | @Bong712 | Windows 桌面宿主、WebView2 + 内置 Node 服务、打包方案（MIT）；本仓库的技术支持与代码基点 | <https://github.com/Bong712/Rhine-Music-Windows> |
+| **Rhine-Music-NCM（本定制版）** | **@Nashviller0207** | 网易云歌单/在线搜索/单曲架接入、专辑内嵌歌词、封面切换与翻面动画、网易云状态提示、打包与发布维护 | <https://github.com/Nashviller0207/Rhine-Music-NCM> |
 
 视觉概念来源于《明日方舟》特别映像「莱茵生命：访问」，相关作品、名称、标志、设定、原 PV 及声音的权利归相应权利人（鹰角网络等）所有。本项目是非官方、非商业的爱好者工程，与官方及网易云音乐均无隶属或授权关系。
 

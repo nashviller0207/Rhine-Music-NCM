@@ -461,6 +461,56 @@
   font-style: normal;
   margin: 0 8px;
 }
+/* Bottom-right NetEase connection indicator: readable when looked at, quiet otherwise. */
+.music-app .netease-status {
+  position: absolute;
+  right: 42px;
+  bottom: 30px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 42%, transparent);
+  color: var(--muted);
+  font: 500 10px/1 "MiSans", system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  opacity: 0.46;
+  cursor: default;
+  user-select: none;
+  transition: opacity 0.18s ease, border-color 0.18s ease;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+.music-app .netease-status:hover {
+  opacity: 0.92;
+  border-color: var(--line);
+}
+.music-app .netease-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #8f948c;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface) 55%, transparent);
+}
+.music-app .netease-status[data-state="ok"] .netease-status-dot {
+  background: #5f9d74;
+}
+.music-app .netease-status[data-state="warn"] .netease-status-dot {
+  background: #c8a04c;
+}
+.music-app .netease-status[data-state="off"] .netease-status-dot {
+  background: #b26a62;
+}
+@media (max-width: 720px) {
+  .music-app .netease-status {
+    right: 22px;
+    bottom: 28px;
+    font-size: 9px;
+  }
+}
 .music-detail {
   --detail-content-top: 170px;
   position: absolute;

@@ -527,6 +527,89 @@ async function request<T>(url: string, body?: unknown, method?: string): Promise
     throw new Error(data?.error || `本地服务请求失败 (${response.status})`);
   return data as T;
 }
+type NeteaseStatus = {
+  enabled?: boolean;
+  loggedIn?: boolean;
+  nickname?: string | null;
+  userId?: number | string | null;
+  playlistCount?: number | null;
+  source?: string | null;
+  error?: string;
+};
+
+function ensureNeteaseBadge() {
+  if (neteaseBadge?.isConnected) return neteaseBadge;
+  if (!$("#three-scene")) return null;
+  const badge = document.createElement("div");
+  badge.className = "netease-status";
+  badge.dataset.state = "checking";
+  badge.title = "正在检查网易云连接状态";
+  badge.innerHTML =
+    '<span class="netease-status-dot"></span><span class="netease-status-label">网易云 · 检测中</span>';
+  badge.addEventListener("click", () => void refreshNeteaseBadge(true));
+  stage.append(badge);
+  neteaseBadge = badge;
+  return badge;
+}
+
+function renderNeteaseBadge(status: NeteaseStatus) {
+  const badge = ensureNeteaseBadge();
+  if (!badge) return;
+  const label = badge.querySelector<HTMLElement>(".netease-status-label");
+  if (!label) return;
+  if (status.enabled && status.loggedIn) {
+    badge.dataset.state = "ok";
+    label.textContent = "网易云 · 已连接";
+    const details = [
+      status.nickname ? `账号：${status.nickname}` : "",
+      status.playlistCount != null ? `${status.playlistCount} 个歌单` : "",
+      status.source === "cookie-file" ? "手动 Cookie" : "",
+    ].filter(Boolean);
+    badge.title = details.length ? details.join(" · ") : "网易云已连接";
+    return;
+  }
+  if (status.enabled) {
+    badge.dataset.state = "warn";
+    label.textContent = "网易云 · 未登录";
+    badge.title = status.error || "已找到网易云客户端，但登录状态无效；登录客户端后点此重新检测";
+    return;
+  }
+  badge.dataset.state = "off";
+  label.textContent = "网易云 · 未连接";
+  badge.title = status.error || "未检测到本机网易云客户端登录状态；登录客户端后点此重新检测";
+}
+
+async function refreshNeteaseBadge(force = false) {
+  ensureNeteaseBadge();
+  if (neteaseBadgeBusy) return;
+  neteaseBadgeBusy = true;
+  try {
+    if (force) {
+      const refreshed = await request<{ status?: NeteaseStatus }>("/api/netease/refresh", {}, "POST");
+      renderNeteaseBadge(refreshed.status || { enabled: false });
+    } else {
+      renderNeteaseBadge(await request<NeteaseStatus>("/api/netease/status"));
+    }
+  } catch (error) {
+    renderNeteaseBadge({ enabled: false, error: (error as Error).message });
+  } finally {
+    neteaseBadgeBusy = false;
+  }
+}
+
+function scheduleNeteaseBadge() {
+  ensureNeteaseBadge();
+  // Give the bundled service a moment before the first status request.
+  window.setTimeout(() => void refreshNeteaseBadge(), 1200);
+  if (neteaseBadgeTimer) clearInterval(neteaseBadgeTimer);
+  neteaseBadgeTimer = setInterval(() => {
+    if (!document.hidden && ready) void refreshNeteaseBadge();
+  }, 45000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && ready) void refreshNeteaseBadge();
+  });
+}
+
 async function loadLibrary(force = false) {
   // Keep the selected cards and cover atlas stable for the opening shot.
   if (boot?.active) {
@@ -630,7 +713,9 @@ async function applyLibrary() {
   }
   albums = orderMusicAlbums(demo ? visualSamples : sourceAlbums, preferences.sortMode);
   genres = demo ? demoGenres : sourceGenres;
+  const setMusicStarted = performance.now();
   setMusicAlbums(albums, genres, preferences.sortMode);
+  lastApplyTiming = { setMusicAlbums: Math.round(performance.now() - setMusicStarted) };
   selected = Math.max(
     0,
     records.findIndex((r) => r.id === previousId),
@@ -642,49 +727,64 @@ async function applyLibrary() {
     ]),
   );
   if (scene && ready && oldVisual !== visualKey(albums, genres)) {
-    const reopen = presentation.openingOrDetail;
-    cancelTrackReveal();
-    libraryRebuilding = true;
-    libraryIntent = undefined;
-    presentation.reset();
-    detailTransition.hide(true);
-    browseTransition.hide(true);
-    try {
-      if (scene.isMusicLibraryScene !== musicLibrary) {
-        scene.dispose();
-        scene = new ArchiveScene($("#three-scene"));
-        if (new URLSearchParams(location.search).get("lighting") !== "baseline")
-          scene.enableSelectionLighting();
-        await Promise.all([
-          scene.load(),
-          document.fonts.load("400 20px MiSans"),
-          document.fonts.load("600 20px MiSans"),
-        ]);
-        ready = true;
-        $("#three-scene canvas").setAttribute(
-          "aria-label",
-          `三维专辑阵列，左右切${sortLabel.column}，上下切专辑`,
-        );
-        stage.classList.toggle("reduce-motion", preferences.reduced);
-        scene.setTheme(preferences.theme);
-        scene.setQuality(renderQuality);
-        scene.setReduced(preferences.reduced);
-        bindSceneNavigation(scene);
+    if (quietLibrarySwap) {
+      // Mid-flight shelf change: rebuild the data but keep camera and surfaces.
+      quietLibrarySwap = false;
+      libraryRebuilding = true;
+      libraryIntent = undefined;
+      try {
+        const swapStarted = performance.now();
+        await scene.swapLibraryInPlace(selected);
+        lastApplyTiming.quietSwap = Math.round(performance.now() - swapStarted);
+      } finally {
+        libraryRebuilding = false;
       }
-      await scene.refreshLibrary(selected);
+      forceBrowseOnce = false;
+    } else {
+      const reopen = presentation.openingOrDetail;
+      cancelTrackReveal();
+      libraryRebuilding = true;
+      libraryIntent = undefined;
+      presentation.reset();
+      detailTransition.hide(true);
+      browseTransition.hide(true);
+      try {
+        if (scene.isMusicLibraryScene !== musicLibrary) {
+          scene.dispose();
+          scene = new ArchiveScene($("#three-scene"));
+          if (new URLSearchParams(location.search).get("lighting") !== "baseline")
+            scene.enableSelectionLighting();
+          await Promise.all([
+            scene.load(),
+            document.fonts.load("400 20px MiSans"),
+            document.fonts.load("600 20px MiSans"),
+          ]);
+          ready = true;
+          $("#three-scene canvas").setAttribute(
+            "aria-label",
+            `三维专辑阵列，左右切${sortLabel.column}，上下切专辑`,
+          );
+          stage.classList.toggle("reduce-motion", preferences.reduced);
+          scene.setTheme(preferences.theme);
+          scene.setQuality(renderQuality);
+          scene.setReduced(preferences.reduced);
+          bindSceneNavigation(scene);
+        }
+        await scene.refreshLibrary(selected);
+      }
+      finally { libraryRebuilding = false; }
+      const intent = libraryIntent as LibraryIntent | undefined;
+      libraryIntent = undefined;
+      const forceBrowse = forceBrowseOnce;
+      forceBrowseOnce = false;
+      scene.setMode("archive");
+      if (intent && "index" in intent)
+        select(intent.index, intent.navigation, intent.openAfter, intent.route);
+      else if (searchShelf || forceBrowse) showBrowseSurface();
+      else if ((intent ? intent.mode === "detail" : reopen) && albums.length)
+        presentation.open();
+      else showBrowseSurface();
     }
-    finally { libraryRebuilding = false; }
-    const intent = libraryIntent as LibraryIntent | undefined;
-    libraryIntent = undefined;
-    const forceBrowse = forceBrowseOnce;
-    forceBrowseOnce = false;
-    scene.setMode("archive");
-    if (intent && "index" in intent)
-      select(intent.index, intent.navigation, intent.openAfter, intent.route);
-    else if (searchShelf || forceBrowse) showBrowseSurface();
-    else if ((intent ? intent.mode === "detail" : reopen) && albums.length)
-      presentation.open();
-    else showBrowseSurface();
   }
   if (!albums.length) {
     cancelTrackReveal();
@@ -857,6 +957,7 @@ function select(index: number, navigation?: ArchiveNavigation, openAfter = prese
 }
 function bindSceneNavigation(target: ArchiveScene) {
   target.onSelect = (index, cell) => {
+    if (shelfTransitioning) return;
     if (boot?.active || presentation.phase !== "archive" || panel) return;
     // Clicking the already-selected album opens it, same as the 打开专辑 button.
     if (!libraryRebuilding && index === selected) {
@@ -866,6 +967,7 @@ function bindSceneNavigation(target: ArchiveScene) {
     select(index, cell ? { cell } : undefined);
   };
   target.onNavigate = (axis, direction) => {
+    if (shelfTransitioning) return;
     if (!boot?.active && presentation.phase === "archive" && !panel)
       axis === "lane" ? stepGenre(direction) : stepAlbum(direction);
   };
@@ -900,7 +1002,7 @@ function navigationSelection() {
   return presentation.pendingSelection?.index ?? selected;
 }
 function stepAlbum(direction: number) {
-  if (!records.length) return;
+  if (shelfTransitioning || !records.length) return;
   const cursor = navigationSelection();
   const files = columnFiles(fileLocation(cursor).lane);
   if (files.length > 1)
@@ -910,7 +1012,7 @@ function stepAlbum(direction: number) {
     });
 }
 function stepGenre(direction: number) {
-  if (!records.length || archiveColumns.length < 2) return;
+  if (shelfTransitioning || !records.length || archiveColumns.length < 2) return;
   const lane = wrap(
     fileLocation(navigationSelection()).lane + direction,
     archiveColumns.length,
@@ -1382,6 +1484,17 @@ let onlineSearchRequest = 0;
 let onlineSearchTimer: ReturnType<typeof setTimeout> | undefined;
 let pendingShelfAfterSearch = false;
 let searchShelf: { albums: MusicAlbum[]; genres: MusicGenre[] } | null = null;
+// Small bottom-right indicator for the NetEase connection/sync state.
+let neteaseBadge: HTMLElement | null = null;
+let neteaseBadgeTimer: ReturnType<typeof setInterval> | undefined;
+let neteaseBadgeBusy = false;
+// While the shelves slide between the album library and a search single shelf the
+// input stays locked so a stray wheel/click cannot cut the camera move short.
+let shelfTransitioning = false;
+// The next applyLibrary() should rebuild records/covers without resetting the camera.
+let quietLibrarySwap = false;
+const shelfWait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+let lastApplyTiming: Record<string, number> = {};
 let forceBrowseOnce = false;
 function renderSearchResults() {
   const query = ($<HTMLInputElement>("#album-search")?.value || "")
@@ -1439,6 +1552,8 @@ async function runOnlineSearch(query: string) {
     if (token === onlineSearchRequest) {
       onlineSearchLoading = false;
       renderOnlineSearchResults();
+      // Decode only a couple of covers ahead of Enter; decoding all 20 at once
+      // competes with the UI. The rest stream in after the shelf is shown.
     }
   }
   if (token !== onlineSearchRequest) return;
@@ -1525,33 +1640,71 @@ function applyLibraryQueued(): Promise<void> {
   return libraryApplyQueue;
 }
 
-function enterOnlineShelf() {
-  if (!onlineSearchSongs.length) return;
-  searchShelf = {
+function buildSearchShelf() {
+  return {
     albums: onlineSearchSongs.map((song, index) => onlineSongAlbum(song, index)),
     genres: [{ id: "netease-search", name: "网易云搜索" }],
   };
-  updateStatus();
-  libraryIntent = { mode: "archive" };
-  forceBrowseOnce = true;
-  closePanel(() => {
-    void applyLibraryQueued().then(() => {
-      if (!searchShelf) return;
-      notify(`搜索结果已放入单曲架：${searchShelf.albums.length} 首 · 滚轮选曲，点击或 Enter 打开`);
-    });
-  });
 }
 
-function exitOnlineShelf() {
-  if (!searchShelf) return;
-  searchShelf = null;
+// The incoming shelf is rendered off screen one/two columns away and then
+// simply slid into the same column. No long camera travel, no rebuild while
+// the camera is moving.
+const SHELF_SLIDE_COLUMNS = 2;
+const SHELF_SLIDE_MS = 560;
+
+async function travelBetweenShelves(nextShelf: { albums: MusicAlbum[]; genres: MusicGenre[] } | null) {
+  const travellingScene = scene;
+  const targetAlbums = nextShelf ? nextShelf.albums : library.albums;
+  // Warm in the background; covers usually arrive while the search panel is
+  // still open, so this only gives slow decodes a short head start.
+  const marks: Record<string, number> = { start: Math.round(performance.now()) };
+  void travellingScene?.warmCovers(targetAlbums.map((entry) => entry.coverUrl));
+  await shelfWait(90);
+  marks.waited = Math.round(performance.now());
+  quietLibrarySwap = true;
+  const enteringSearch = Boolean(nextShelf);
+  if (nextShelf) searchShelf = nextShelf;
+  else searchShelf = null;
   updateStatus();
   libraryIntent = { mode: "archive" };
   forceBrowseOnce = true;
-  void applyLibraryQueued().then(() => {
+  await applyLibraryQueued();
+  marks.applied = Math.round(performance.now());
+  const landedScene = scene;
+  // The rebuilt shelf appeared off screen; slide it into the original column.
+  landedScene?.setShelfOffset(enteringSearch ? -SHELF_SLIDE_COLUMNS : SHELF_SLIDE_COLUMNS);
+  await shelfWait(20);
+  await landedScene?.travelShelfTo(0, SHELF_SLIDE_MS);
+  marks.slid = Math.round(performance.now());
+  (window as unknown as { __travelTiming?: Record<string, number> }).__travelTiming = marks;
+}
+
+async function enterOnlineShelf() {
+  if (!onlineSearchSongs.length || shelfTransitioning) return;
+  shelfTransitioning = true;
+  const nextShelf = buildSearchShelf();
+  closePanel();
+  try {
+    await travelBetweenShelves(nextShelf);
+    if (!searchShelf) return;
+    notify(`搜索结果已放入单曲架：${searchShelf.albums.length} 首 · 滚轮选曲，点击或 Enter 打开`);
+  } finally {
+    shelfTransitioning = false;
+  }
+}
+
+/** The reverse move: single shelf slides away, the album library slides back in. */
+async function exitOnlineShelf() {
+  if (!searchShelf || shelfTransitioning) return;
+  shelfTransitioning = true;
+  try {
+    await travelBetweenShelves(null);
     if (searchShelf) return;
     notify("已退出单曲架，回到我的曲库。");
-  });
+  } finally {
+    shelfTransitioning = false;
+  }
 }
 
 function renderSettingsPanel() {
@@ -1562,7 +1715,7 @@ function renderSettingsPanel() {
     ${qualityMarkup(renderQuality)}
     <section class="panel-section"><h3>动效与显示</h3><label class="settings-row"><span>减少动态效果<small>简化镜头、文字加载和页签过渡</small></span><input type="checkbox" id="reduced-motion" ${preferences.reduced ? "checked" : ""}></label><button class="text-button" data-action="fullscreen">切换全屏 ↗</button></section>
     <section class="panel-section"><h3>声音</h3><label class="settings-row"><span>歌曲音量</span><input type="range" id="volume" aria-label="歌曲音量" min="0" max="100" value="${Math.round(preferences.volume * 100)}"></label><label class="settings-row"><span>切歌淡入淡出<small>当前歌曲先淡出，再淡入下一首</small></span><input type="checkbox" id="song-fade-setting" ${preferences.songFade ? "checked" : ""}></label><label class="settings-row"><span>界面音效<small>玻璃卡片与终端操作</small></span><input type="checkbox" id="sound-setting" ${preferences.sound ? "checked" : ""}></label><label class="settings-row"><span>音效音量</span><input type="range" id="sound-volume" aria-label="音效音量" min="0" max="100" value="${Math.round(preferences.soundVolume * 100)}"></label><label class="settings-row"><span>氛围 BGM<small>专辑开始前淡出，停止后淡入</small></span><input type="checkbox" id="bgm-setting" ${preferences.bgm ? "checked" : ""}></label><label class="settings-row"><span>BGM 音量</span><input type="range" id="bgm-volume" aria-label="BGM 音量" min="0" max="100" value="${Math.round(preferences.bgmVolume * 100)}"></label><button class="text-button" data-action="sound-preview">试听界面音效 ↗</button><p>当前版本支持 Windows 与 macOS，使用浏览器播放本地音乐。DSF / DFF 暂不支持播放，其他格式取决于浏览器解码能力。</p></section>
-    <section class="panel-section"><h3>开发与资源</h3><p>Rhine Music · Windows 桌面版 · WebView2 / WebGL 2（ANGLE）图形渲染。</p><p>Windows 版开发者：<a href="https://github.com/Bong712" target="_blank" rel="noopener">Bong712 ↗</a><br>特别鸣谢：<a href="https://github.com/RonaldDeng/Rhine-Music-Demo" target="_blank" rel="noopener">RonaldDeng ↗</a><br>原版界面：<a href="https://github.com/LBEILC/RhineLabUI" target="_blank" rel="noopener">LBEILC / RhineLabUI ↗</a></p><p><a href="/licenses/project-mit.txt" target="_blank" rel="noopener">代码 MIT 许可 ↗</a> · <a href="https://github.com/Bong712/Rhine-Music-Windows/blob/main/NOTICE.md" target="_blank" rel="noopener">版权与资源说明 ↗</a></p><a href="/?original=1&scene=archive" target="_blank" rel="noopener">打开原版档案界面 ↗</a><p><a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">MiSans 字体许可 ↗</a></p></section>`;
+    <section class="panel-section"><h3>开发与资源</h3><p>Rhine Music · Windows 桌面版 · WebView2 / WebGL 2（ANGLE）图形渲染。</p><p>技术支持：<a href="https://github.com/Bong712" target="_blank" rel="noopener">Bong712 ↗</a><br>Windows 版开发 / 网易云定制：<a href="https://github.com/Nashviller0207" target="_blank" rel="noopener">Nashviller0207 ↗</a></p><p>本定制版在上游基础上新增：网易云账号歌单与「我喜欢的音乐」接入、在线搜索与单曲架、专辑详情内嵌同步歌词、单曲封面切换、专辑卡翻面与架子滑入动画、网易云连接状态提示等。</p><p>特别鸣谢：<a href="https://github.com/RonaldDeng/Rhine-Music-Demo" target="_blank" rel="noopener">RonaldDeng ↗</a></p><p><a href="/licenses/project-mit.txt" target="_blank" rel="noopener">代码 MIT 许可 ↗</a> · <a href="https://github.com/Nashviller0207/Rhine-Music-NCM/blob/main/NOTICE.md" target="_blank" rel="noopener">版权与资源说明 ↗</a></p><a href="/?original=1&scene=archive" target="_blank" rel="noopener">打开原版档案界面 ↗</a><p><a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">MiSans 字体许可 ↗</a></p></section>`;
   updateQuality();
   updateIntroductionStatus();
 }
@@ -2369,12 +2522,25 @@ document.addEventListener("keydown", (e) => {
     const input = e.target as HTMLInputElement;
     const query = input.value.trim();
     if (!query) return;
+    // Results for this query are already in memory: skip the redundant search
+    // request (and its panel re-render) and go straight to the shelf.
+    if (
+      query === onlineSearchQuery &&
+      onlineSearchSongs.length &&
+      !onlineSearchLoading &&
+      !onlineSearchError
+    ) {
+      if (onlineSearchTimer) clearTimeout(onlineSearchTimer);
+      pendingShelfAfterSearch = false;
+      void enterOnlineShelf();
+      return;
+    }
     if (onlineSearchTimer) clearTimeout(onlineSearchTimer);
     pendingShelfAfterSearch = true;
     void runOnlineSearch(query);
     return;
   }
-  if (boot?.active) return;
+  if (boot?.active || shelfTransitioning) return;
   if (viewer?.isOpen) return;
   if (e.key === "Escape") {
     if (detailLyricsOpen) {
@@ -2461,7 +2627,7 @@ document.addEventListener("keydown", (e) => {
 // Right-click backs out one level: lyrics -> album detail -> archive.
 document.addEventListener("contextmenu", (event) => {
   event.preventDefault();
-  if (boot?.active || viewer?.isOpen) return;
+  if (boot?.active || shelfTransitioning || viewer?.isOpen) return;
   if (detailLyricsOpen) {
     closeDetailLyrics();
     return;
@@ -2481,7 +2647,7 @@ document.addEventListener("contextmenu", (event) => {
 let wheelStepAt = 0;
 let wheelAccumulated = 0;
 window.addEventListener("wheel", (event) => {
-  if (boot?.active || panel || viewer?.isOpen) return;
+  if (boot?.active || shelfTransitioning || panel || viewer?.isOpen) return;
   if (mode !== "archive" || presentation.phase !== "archive" || libraryRebuilding) return;
   const target = event.target as HTMLElement | null;
   if (target?.closest("#music-panel-root, input, textarea, select")) return;
@@ -2619,6 +2785,7 @@ async function start() {
     $("#music-browse").inert = !albums.length;
     $("#music-browse").setAttribute("aria-hidden", String(!albums.length));
     syncSelectionMotion();
+    scheduleNeteaseBadge();
     requestAnimationFrame((ms) => {
       stage.classList.add("theme-motion-ready");
       frame(ms);
@@ -2655,6 +2822,20 @@ Object.assign(window, {
     coverPreviewDataUrl: () => scene?.getCoverPreviewDataUrl(),
     get cardLift() {
       return scene?.selectedCardLift ?? 0;
+    },
+    testEnterSearchShelf: () => void enterOnlineShelf(),
+    testExitSearchShelf: () => void exitOnlineShelf(),
+    get shelfState() {
+      return {
+        transitioning: shelfTransitioning,
+        searchShelf: searchShelf ? searchShelf.albums.length : null,
+        offset: scene?.shelfTravelOffset ?? 0,
+        travelActive: scene?.isShelfTraveling ?? false,
+        swap: scene?.swapTiming,
+        coverPaint: scene?.coverPaintStats,
+        apply: lastApplyTiming,
+        travel: (window as unknown as { __travelTiming?: Record<string, number> }).__travelTiming,
+      };
     },
     get presentation() {
       return { phase: presentation.phase, cameraPhase: scene?.musicPresentationPhase,

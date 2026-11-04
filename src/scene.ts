@@ -148,6 +148,16 @@ export class ArchiveScene {
   private dragging = false;
   private rotation = 0;
   private targetRotation = 0;
+  /** Horizontal shelf travel used when switching between album and single shelves. */
+  private shelfTravel = 0;
+  private shelfTravelTween: {
+    from: number;
+    to: number;
+    start: number;
+    duration: number;
+    resolve: () => void;
+  } | null = null;
+  private shelfTraveling = false;
   private light: THREE.DirectionalLight;
   private floor: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshStandardMaterial>;
   private stars?: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
@@ -526,6 +536,9 @@ export class ArchiveScene {
     this.coordinateOrigin = { lane: 0, row: 0 };
     this.lift = { value: 0, velocity: 0 };
     this.rotation = this.targetRotation = 0;
+    this.shelfTravel = 0;
+    this.shelfTravelTween = null;
+    this.shelfTraveling = false;
     this.selectedCoverUrl = undefined;
     this.returnY = null;
     this.pulses = [];
@@ -977,6 +990,118 @@ export class ArchiveScene {
   get selectedCardLift() {
     return this.lift.value;
   }
+  private lastSwapTiming: Record<string, number> = {};
+  get swapTiming() {
+    return this.lastSwapTiming;
+  }
+  get coverPaintStats() {
+    return this.covers?.paintStats;
+  }
+  resetCoverPaintStats() {
+    this.covers?.resetPaintStats();
+  }
+  /** True while a shelf-to-shelf travel animation owns the input. */
+  get isShelfTraveling() {
+    return this.shelfTraveling;
+  }
+  get shelfTravelOffset() {
+    return this.shelfTravel;
+  }
+  get shelfColumnCount() {
+    return archiveColumns.length;
+  }
+  /** Decode every cover of the shelf that is about to slide in. */
+  async warmCovers(urls: (string | undefined)[]) {
+    const list = [...new Set(urls.filter((url): url is string => Boolean(url)))];
+    if (!this.covers || !list.length) return;
+    const workers = Array.from({ length: Math.min(6, list.length) }, async (_, worker) => {
+      for (let index = worker; index < list.length; index += 6)
+        await this.covers!.warm(list[index]);
+    });
+    await Promise.all(workers);
+  }
+  /**
+   * Rebuild the library while the shelf is off screen: keeps the camera,
+   * presentation and the running shelf travel untouched.
+   */
+  async swapLibraryInPlace(selectedIndex = 0) {
+    if (!this.loaded || !this.covers) return;
+    const timing: Record<string, number> = {};
+    const mark = (name: string, since?: number) => {
+      if (since !== undefined) timing[name] = Math.round(performance.now() - since);
+    };
+    const started = performance.now();
+    for (const old of this.outgoing) {
+      this.scene.remove(old.group);
+      this.appearance.dispose(old.group);
+    }
+    this.outgoing = [];
+    mark("disposeOutgoing", started);
+    const resetStart = performance.now();
+    this.covers.reset(true);
+    mark("atlasReset", resetStart);
+    for (const array of this.covers.arrays) array.visible = false;
+    this.covers.selected.visible = musicLibrary && records.length > 0;
+    this.covers.selectedBack.visible = this.covers.selected.visible;
+    this.model.visible = records.length > 0;
+    for (const inst of this.instances) inst.visible = records.length > 0;
+    if (this.shadowOnlyInstances) this.shadowOnlyInstances.visible = records.length > 0;
+    for (const child of this.model.children) {
+      if (child.userData.surface)
+        child.visible = !musicLibrary || child.userData.surface !== "Printed_Label";
+      if (child.userData.printedLabel) child.visible = !musicLibrary;
+    }
+    const index = Math.max(0, Math.min(records.length - 1, selectedIndex));
+    const location = fileLocation(index);
+    this.selectedSlot = location.slot;
+    this.selectedCell = { lane: location.lane, row: location.row };
+    this.coordinateOrigin = { lane: 0, row: 0 };
+    this.selectedCoverUrl = undefined;
+    this.returnY = null;
+    this.pulses = [];
+    this.pendingPulse = null;
+    this.shoulder = { value: location.row, velocity: 0 };
+    this.laneFocus = { value: location.lane, velocity: 0 };
+    this.columnCamera = { value: (location.lane - 2) * COLUMN_SPACING, velocity: 0 };
+    const chosen = this.cellPosition({ lane: location.lane, row: location.row });
+    this.rail = { value: -2.17 - chosen.z, velocity: 0 };
+    this.selectedCoverUrl = records[index]?.album?.coverUrl;
+    const selectStart = performance.now();
+    // Do not block the shelf swap on the 1024px lifted-card print; it finishes
+    // a frame or two later without holding up the slide.
+    void this.covers.select(records[index]).then(() => mark("selectCover", selectStart));
+    mark("swapWithoutCover", selectStart);
+    timing.total = Math.round(performance.now() - started);
+    this.lastSwapTiming = timing;
+  }
+  /** Place the whole shelf a number of columns away without animating. */
+  setShelfOffset(columns: number) {
+    this.shelfTravelTween = null;
+    this.shelfTravel = columns * COLUMN_SPACING;
+  }
+  /** Slide the shelf horizontally to a target column offset. */
+  travelShelfTo(columns: number, ms = 460) {
+    const to = columns * COLUMN_SPACING;
+    this.shelfTraveling = true;
+    return new Promise<void>((resolve) => {
+      const duration = (this.reduced ? Math.min(120, ms) : ms) / 1000;
+      this.shelfTravelTween = {
+        from: this.shelfTravel,
+        to,
+        start: this.clock,
+        duration,
+        resolve: () => {
+          this.shelfTraveling = false;
+          resolve();
+        },
+      };
+    });
+  }
+  /** Cancel any travel ownership (used when the scene is rebuilt). */
+  cancelShelfTravel() {
+    this.shelfTravelTween = null;
+    this.shelfTraveling = false;
+  }
   /** Retarget the detail rail without replaying the archive/inspection move. */
   switchMusicAlbum(index: number, navigation?: ArchiveNavigation) {
     if (!musicLibrary || !this.loaded || !records[index] || !this.musicPresentation.placed) return;
@@ -1304,6 +1429,18 @@ export class ArchiveScene {
     this.last = time;
     this.clock = time;
     if (!this.loaded) return;
+    if (this.shelfTravelTween) {
+      const tween = this.shelfTravelTween;
+      const t = Math.min(1, (time - tween.start) / Math.max(1, tween.duration));
+      // Ease in/out so the shelves accelerate away and settle on arrival.
+      const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+      this.shelfTravel = tween.from + (tween.to - tween.from) * eased;
+      if (t >= 1) {
+        this.shelfTravel = tween.to;
+        this.shelfTravelTween = null;
+        tween.resolve();
+      }
+    }
     const profiling = this.profiler.enabled;
     const profileStart = profiling ? performance.now() : 0;
     let phaseStart = profileStart;
@@ -1404,7 +1541,8 @@ export class ArchiveScene {
     }
     // Keep the illuminated set near the origin. Lateral navigation is a track
     // movement of the whole array, just like the existing front/back rail.
-    const trackX = cinematic && !musicIntro ? 0 : this.columnCamera.value;
+    const trackX =
+      cinematic && !musicIntro ? 0 : this.columnCamera.value + this.shelfTravel;
     const center = {
       lane: this.columnCamera.value / COLUMN_SPACING + 2,
       row: (-this.rail.value - 2.17) / ROW_SPACING + 15.5,
@@ -1902,7 +2040,13 @@ export class ArchiveScene {
     this.visibleInstanceIndices.length = 0;
     let visibleInstanceCount = 0;
     let shadowOnlyInstanceCount = 0;
-    if (musicLibrary && this.covers) this.covers.hideArrayPages();
+    if (musicLibrary && this.covers) {
+      this.covers.hideArrayPages();
+      // Paint at most a few new covers per frame; the rest stay hidden until
+      // their turn so a library swap can never stall a whole frame.
+      this.covers.beginFrame(1);
+      this.covers.flushPending();
+    }
     let pageResetEnded = profiling ? performance.now() : 0;
     let atlasSlotUpdateMs = 0;
     const instanceLoopStarted = profiling ? performance.now() : 0;
@@ -1922,7 +2066,8 @@ export class ArchiveScene {
       this.instanceBounds.center.copy(this.dummy.position);
       this.instanceBounds.radius = this.instanceCullRadius;
       const notHidden = !hiddenByMode && !hidden.has(this.cellKeys[i]);
-      const cameraVisible = notHidden && this.instanceFrustum.intersectsSphere(this.instanceBounds);
+      let cameraVisible = notHidden && this.instanceFrustum.intersectsSphere(this.instanceBounds);
+      if (cameraVisible && this.covers?.isPendingSlot(i)) cameraVisible = false;
       const shadowVisible = notHidden && this.renderer.shadowMap.enabled &&
         this.shadowFrustum.intersectsSphere(this.instanceBounds);
       const visible = cameraVisible || shadowVisible;
